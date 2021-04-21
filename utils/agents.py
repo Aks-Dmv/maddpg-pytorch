@@ -103,6 +103,7 @@ class RL_DNRIAgent(object):
             num_in_pol (int): number of dimensions for policy input
             num_out_pol (int): number of dimensions for policy output
         """
+        self.exploration = 0.3
         self.encoder = DNRI_Encoder(num_in_pol, num_out_pol, num_vars, 
                             hidden_dim)
         self.decoder = DNRI_MLP_Decoder(num_in_pol, num_out_pol, num_vars, 
@@ -137,6 +138,13 @@ class RL_DNRIAgent(object):
         prior_logits = gumbel_softmax(prior_logits, hard=True)
         
         pi_action, logp_pi, decoder_hidden_state = self.decoder(obs, prior_logits)
+        if explore:
+            expl_noise = Variable(Tensor(self.exploration)), 
+                            requires_grad=False)
+            if pi_action.is_cuda:
+                expl_noise = expl_noise.cuda()
+            pi_action += expl_noise
+        pi_action = pi_action.clamp(-1, 1)
         return pi_action, logp_pi, new_enc_hid, decoder_hidden_state
 
     def get_params(self):
