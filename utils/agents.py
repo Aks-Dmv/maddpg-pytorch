@@ -139,7 +139,7 @@ class RL_DNRIAgent(object):
         
         pi_action, logp_pi, decoder_hidden_state = self.decoder(obs, prior_logits)
         if explore:
-            expl_noise = Variable(Tensor(self.exploration), 
+            expl_noise = Variable((torch.rand(pi_action.shape)-0.5)*self.exploration, 
                             requires_grad=False)
             if pi_action.is_cuda:
                 expl_noise = expl_noise.cuda()
