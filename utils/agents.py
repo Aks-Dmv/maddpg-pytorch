@@ -103,7 +103,6 @@ class RL_DNRIAgent(object):
             num_in_pol (int): number of dimensions for policy input
             num_out_pol (int): number of dimensions for policy output
         """
-        self.exploration = 0.3
         self.encoder = DNRI_Encoder(num_in_pol, num_out_pol, num_vars, 
                             hidden_dim)
         self.decoder = DNRI_MLP_Decoder(num_in_pol, num_out_pol, num_vars, 
@@ -118,12 +117,21 @@ class RL_DNRIAgent(object):
         self.policy_optimizer = Adam( list(self.encoder.parameters()) + list(self.decoder.parameters()), lr=lr)
         self.critic_optimizer = Adam(self.critic.parameters(), lr=lr)
 
+        if not discrete_action:
+            self.exploration = OUNoise(num_out_pol)
+        else:
+            self.exploration = 0.3  # epsilon for eps-greedy
+        self.discrete_action = discrete_action
+
     def reset_noise(self):
-        # we are not resetting noise here, we just reset the hidden state
-        return 0
+        if not self.discrete_action:
+            self.exploration.reset()
 
     def scale_noise(self, scale):
-        return 0
+        if self.discrete_action:
+            self.exploration = scale
+        else:
+            self.exploration.scale = scale
 
     def step(self, obs, enc_hid, explore=False):
         """
@@ -139,8 +147,8 @@ class RL_DNRIAgent(object):
         
         pi_action, logp_pi, decoder_hidden_state = self.decoder(obs, prior_logits)
         if explore:
-            expl_noise = Variable((torch.rand(pi_action.shape)-0.5)*self.exploration, 
-                            requires_grad=False)
+            expl_noise = Variable(Tensor(self.exploration.noise()),
+                                   requires_grad=False)
             if pi_action.is_cuda:
                 expl_noise = expl_noise.cuda()
             pi_action += expl_noise
