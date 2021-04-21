@@ -112,7 +112,10 @@ class PolicyNetwork(nn.Module):
             pi_action = mu
 
         logp_pi = pi_distribution.log_prob(pi_action).sum(dim=-1)
-        logp_pi -= (2*(torch.log(torch.Tensor([2.])) - pi_action - F.softplus(-2*pi_action))).sum(dim=-1)
+        log_2_torch = torch.log(torch.Tensor([2.]))
+        if pi_action.is_cuda:
+            log_2_torch = log_2_torch.cuda()
+        logp_pi -= (2*(log_2_torch - pi_action - F.softplus(-2*pi_action))).sum(dim=-1)
         
         pi_action = self.out_fn(pi_action)
         return pi_action, logp_pi
@@ -173,6 +176,9 @@ class GNNNetwork(nn.Module):
 
         all_msgs = torch.zeros(pre_msg.size(0), pre_msg.size(1),
                             self.msg_out_shape)
+
+        if pre_msg.is_cuda:
+            all_msgs = all_msgs.cuda()
 
         if self.skip_first_edge_type:
             start_idx = 1
