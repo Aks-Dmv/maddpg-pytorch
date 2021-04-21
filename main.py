@@ -58,7 +58,8 @@ def run(config):
     replay_buffer = ReplayBuffer(config.buffer_length, maddpg.nagents,
                                  [obsp.shape[0] for obsp in env.observation_space],
                                  [acsp.shape[0] if isinstance(acsp, Box) else acsp.n
-                                  for acsp in env.action_space])
+                                  for acsp in env.action_space],
+                                  config.hidden_dim*(maddpg.nagents - 1))
     t = 0
     for ep_i in range(0, config.n_episodes, config.n_rollout_threads):
         print("Episodes %i-%i of %i" % (ep_i + 1,
@@ -72,19 +73,27 @@ def run(config):
         maddpg.scale_noise(config.final_noise_scale + (config.init_noise_scale - config.final_noise_scale) * explr_pct_remaining)
         maddpg.reset_noise()
 
+        rnn_hidden = ( torch.zeros(1, config.n_rollout_threads * (maddpg.nagents)*(maddpg.nagents - 1), config.hidden_dim), 
+                        torch.zeros(1, config.n_rollout_threads * (maddpg.nagents)*(maddpg.nagents - 1), config.hidden_dim) )
+
         for et_i in range(config.episode_length):
             # rearrange observations to be per agent, and convert to torch Variable
             torch_obs = [Variable(torch.Tensor(np.vstack(obs[:, i])),
                                   requires_grad=False)
                          for i in range(maddpg.nagents)]
             # get actions as torch Variables
-            torch_agent_actions = maddpg.step(torch_obs, explore=True)
+            torch_agent_actions, new_rnn_hidden = maddpg.step(torch_obs, rnn_hidden, explore=True)
+            hid_to_store = (rnn_hidden[0].detach().contiguous().view(config.n_rollout_threads, maddpg.nagents, -1),
+                       rnn_hidden[1].detach().contiguous().view(config.n_rollout_threads, maddpg.nagents, -1))
+            next_hid_to_store = (new_rnn_hidden[0].detach().contiguous().view(config.n_rollout_threads, maddpg.nagents, -1),
+                       new_rnn_hidden[1].detach().contiguous().view(config.n_rollout_threads, maddpg.nagents, -1))
+
             # convert actions to numpy arrays
             agent_actions = [ac.data.numpy() for ac in torch_agent_actions]
             # rearrange actions to be per environment
             actions = [[ac[i] for ac in agent_actions] for i in range(config.n_rollout_threads)]
             next_obs, rewards, dones, infos = env.step(actions)
-            replay_buffer.push(obs, agent_actions, rewards, next_obs, dones)
+            replay_buffer.push(obs, hid_to_store, agent_actions, rewards, next_obs, next_hid_to_store, dones)
             obs = next_obs
             t += config.n_rollout_threads
             if (len(replay_buffer) >= config.batch_size and
@@ -125,7 +134,7 @@ if __name__ == '__main__':
     parser.add_argument("--seed",
                         default=1, type=int,
                         help="Random seed")
-    parser.add_argument("--n_rollout_threads", default=1, type=int)
+    parser.add_argument("--n_rollout_threads", default=8, type=int)
     parser.add_argument("--n_training_threads", default=6, type=int)
     parser.add_argument("--buffer_length", default=int(1e6), type=int)
     parser.add_argument("--n_episodes", default=25000, type=int)

@@ -1,9 +1,10 @@
 import torch
 import torch.nn.functional as F
+from torch.autograd import Variable
 from gym.spaces import Box, Discrete
 from utils.networks import MLPNetwork
 from utils.misc import soft_update, average_gradients, onehot_from_logits, gumbel_softmax
-from utils.agents import DDPGAgent
+from utils.agents import DDPGAgent, RL_DNRIAgent
 
 MSELoss = torch.nn.MSELoss()
 
@@ -31,28 +32,33 @@ class MADDPG(object):
         """
         self.nagents = len(alg_types)
         self.alg_types = alg_types
-        self.agents = [DDPGAgent(lr=lr, discrete_action=discrete_action,
+        # because all agents are identical
+        # self.agents = RL_DNRIAgent(agent_init_params[0]["num_in_pol"], agent_init_params[0]["num_out_pol"], 
+        #                 agent_init_params[0]["num_vars"], hidden_dim=hidden_dim, lr=lr, discrete_action=discrete_action)
+
+        self.agents = RL_DNRIAgent(lr=lr, discrete_action=discrete_action,
                                  hidden_dim=hidden_dim,
-                                 **params)
-                       for params in agent_init_params]
+                                 **(agent_init_params[0]))
+
+        self.hidden_dim = hidden_dim
         self.agent_init_params = agent_init_params
         self.gamma = gamma
+        self.alpha = 0.4
         self.tau = tau
         self.lr = lr
         self.discrete_action = discrete_action
         self.pol_dev = 'cpu'  # device for policies
         self.critic_dev = 'cpu'  # device for critics
-        self.trgt_pol_dev = 'cpu'  # device for target policies
         self.trgt_critic_dev = 'cpu'  # device for target critics
         self.niter = 0
 
     @property
     def policies(self):
-        return [a.policy for a in self.agents]
+        return [self.agents.encoder, self.agents.decoder]
 
     @property
     def target_policies(self):
-        return [a.target_policy for a in self.agents]
+        return [self.agents.encoder, self.agents.decoder]
 
     def scale_noise(self, scale):
         """
@@ -60,14 +66,12 @@ class MADDPG(object):
         Inputs:
             scale (float): scale of noise
         """
-        for a in self.agents:
-            a.scale_noise(scale)
+        return 0
 
     def reset_noise(self):
-        for a in self.agents:
-            a.reset_noise()
+        self.agents.reset_noise()
 
-    def step(self, observations, explore=False):
+    def step(self, observations, enc_hid, explore=False):
         """
         Take a step forward in environment with all agents
         Inputs:
@@ -76,8 +80,11 @@ class MADDPG(object):
         Outputs:
             actions: List of actions for each agent
         """
-        return [a.step(obs, explore=explore) for a, obs in zip(self.agents,
-                                                                 observations)]
+        torch_obs = torch.stack(observations, dim=0).transpose(0, 1).contiguous()
+        torch_obs = Variable(torch_obs, requires_grad=False)
+        pi_action, _, new_enc_hid, _ = self.agents.step(torch_obs, enc_hid)
+        pi_action = pi_action.transpose(0, 1).contiguous() # back to [agent, batch, hidden]
+        return pi_action, new_enc_hid
 
     def update(self, sample, agent_i, parallel=False, logger=None):
         """
@@ -92,77 +99,57 @@ class MADDPG(object):
             logger (SummaryWriter from Tensorboard-Pytorch):
                 If passed in, important quantities will be logged
         """
-        obs, acs, rews, next_obs, dones = sample
-        curr_agent = self.agents[agent_i]
+        obs, hid_enc0, hid_enc1, acs, rews, next_obs, next_hid_enc0, next_hid_enc1, dones = sample
+        obs = torch.stack(obs, dim=0).transpose(0, 1).contiguous()
+        hid_enc0 = torch.stack(hid_enc0, dim=0).transpose(0, 1).contiguous().view(obs.shape[0],-1, self.hidden_dim)
+        hid_enc1 = torch.stack(hid_enc1, dim=0).transpose(0, 1).contiguous().view(obs.shape[0],-1, self.hidden_dim)
+        acs = torch.stack(acs, dim=0).transpose(0, 1).contiguous()
+        rews = torch.stack(rews, dim=0).transpose(0, 1).contiguous()
+        next_obs = torch.stack(next_obs, dim=0).transpose(0, 1).contiguous()
+        next_hid_enc0 = torch.stack(next_hid_enc0, dim=0).transpose(0, 1).contiguous().view(obs.shape[0],-1, self.hidden_dim)
+        next_hid_enc1 = torch.stack(next_hid_enc1, dim=0).transpose(0, 1).contiguous().view(obs.shape[0],-1, self.hidden_dim)
+        dones = torch.stack(dones, dim=0).transpose(0, 1).contiguous()
 
+        hid_enc = (hid_enc0, hid_enc1)
+        next_hid_enc = (next_hid_enc0, next_hid_enc1)
+
+        curr_agent = self.agents
+
+        curr_agent.policy_optimizer.zero_grad()
         curr_agent.critic_optimizer.zero_grad()
-        if self.alg_types[agent_i] == 'MADDPG':
-            if self.discrete_action: # one-hot encode action
-                all_trgt_acs = [onehot_from_logits(pi(nobs)) for pi, nobs in
-                                zip(self.target_policies, next_obs)]
-            else:
-                all_trgt_acs = [pi(nobs) for pi, nobs in zip(self.target_policies,
-                                                             next_obs)]
-            trgt_vf_in = torch.cat((*next_obs, *all_trgt_acs), dim=1)
-        else:  # DDPG
-            if self.discrete_action:
-                trgt_vf_in = torch.cat((next_obs[agent_i],
-                                        onehot_from_logits(
-                                            curr_agent.target_policy(
-                                                next_obs[agent_i]))),
-                                       dim=1)
-            else:
-                trgt_vf_in = torch.cat((next_obs[agent_i],
-                                        curr_agent.target_policy(next_obs[agent_i])),
-                                       dim=1)
-        target_value = (rews[agent_i].view(-1, 1) + self.gamma *
-                        curr_agent.target_critic(trgt_vf_in) *
-                        (1 - dones[agent_i].view(-1, 1)))
+        pi_action2, logp_pi, _, trgt_vf_in = curr_agent.step(next_obs, next_hid_enc)
+        
+        q1_pi_targ, q2_pi_targ = curr_agent.target_critic(trgt_vf_in.detach(), pi_action2.detach())
+        q_pi_targ = torch.min(q1_pi_targ, q2_pi_targ).sum(dim=-1)
+        target_value = (rews + self.gamma *
+                        ( q_pi_targ - self.alpha * logp_pi.detach()) *
+                        (1 - dones))
 
-        if self.alg_types[agent_i] == 'MADDPG':
-            vf_in = torch.cat((*obs, *acs), dim=1)
-        else:  # DDPG
-            vf_in = torch.cat((obs[agent_i], acs[agent_i]), dim=1)
-        actual_value = curr_agent.critic(vf_in)
-        vf_loss = MSELoss(actual_value, target_value.detach())
+
+        pi_action1, _, _, vf_in = curr_agent.step(obs, hid_enc)
+        actual_value1, actual_value2  = curr_agent.critic(vf_in.detach(), pi_action1.detach())
+        vf_loss = MSELoss(actual_value1.sum(dim=-1), target_value.detach()) + MSELoss(actual_value2.sum(dim=-1), target_value.detach())
         vf_loss.backward()
         if parallel:
             average_gradients(curr_agent.critic)
-        torch.nn.utils.clip_grad_norm(curr_agent.critic.parameters(), 0.5)
+        torch.nn.utils.clip_grad_norm_(curr_agent.critic.parameters(), 0.5)
         curr_agent.critic_optimizer.step()
 
         curr_agent.policy_optimizer.zero_grad()
+        curr_agent.critic_optimizer.zero_grad()
 
-        if self.discrete_action:
-            # Forward pass as if onehot (hard=True) but backprop through a differentiable
-            # Gumbel-Softmax sample. The MADDPG paper uses the Gumbel-Softmax trick to backprop
-            # through discrete categorical samples, but I'm not sure if that is
-            # correct since it removes the assumption of a deterministic policy for
-            # DDPG. Regardless, discrete policies don't seem to learn properly without it.
-            curr_pol_out = curr_agent.policy(obs[agent_i])
-            curr_pol_vf_in = gumbel_softmax(curr_pol_out, hard=True)
-        else:
-            curr_pol_out = curr_agent.policy(obs[agent_i])
-            curr_pol_vf_in = curr_pol_out
-        if self.alg_types[agent_i] == 'MADDPG':
-            all_pol_acs = []
-            for i, pi, ob in zip(range(self.nagents), self.policies, obs):
-                if i == agent_i:
-                    all_pol_acs.append(curr_pol_vf_in)
-                elif self.discrete_action:
-                    all_pol_acs.append(onehot_from_logits(pi(ob)))
-                else:
-                    all_pol_acs.append(pi(ob))
-            vf_in = torch.cat((*obs, *all_pol_acs), dim=1)
-        else:  # DDPG
-            vf_in = torch.cat((obs[agent_i], curr_pol_vf_in),
-                              dim=1)
-        pol_loss = -curr_agent.critic(vf_in).mean()
-        pol_loss += (curr_pol_out**2).mean() * 1e-3
+        pi_action, logp_pi, _, dec_hidden = curr_agent.step(obs, hid_enc)
+        
+        q1_pi, q2_pi = curr_agent.critic(dec_hidden.detach(), pi_action)
+        q_pi = torch.min(q1_pi, q2_pi).sum(dim=-1)
+
+        pol_loss = (self.alpha * logp_pi - q_pi ).mean()
         pol_loss.backward()
         if parallel:
-            average_gradients(curr_agent.policy)
-        torch.nn.utils.clip_grad_norm(curr_agent.policy.parameters(), 0.5)
+            average_gradients(curr_agent.encoder)
+            average_gradients(curr_agent.decoder)
+        torch.nn.utils.clip_grad_norm_(curr_agent.encoder.parameters(), 0.5)
+        torch.nn.utils.clip_grad_norm_(curr_agent.decoder.parameters(), 0.5)
         curr_agent.policy_optimizer.step()
         if logger is not None:
             logger.add_scalars('agent%i/losses' % agent_i,
@@ -175,49 +162,39 @@ class MADDPG(object):
         Update all target networks (called after normal updates have been
         performed for each agent)
         """
-        for a in self.agents:
-            soft_update(a.target_critic, a.critic, self.tau)
-            soft_update(a.target_policy, a.policy, self.tau)
+        soft_update(self.agents.target_critic, self.agents.critic, self.tau)
         self.niter += 1
 
     def prep_training(self, device='gpu'):
-        for a in self.agents:
-            a.policy.train()
-            a.critic.train()
-            a.target_policy.train()
-            a.target_critic.train()
+        self.agents.encoder.train()
+        self.agents.decoder.train()
+        self.agents.critic.train()
         if device == 'gpu':
             fn = lambda x: x.cuda()
         else:
             fn = lambda x: x.cpu()
         if not self.pol_dev == device:
-            for a in self.agents:
-                a.policy = fn(a.policy)
+            self.agents.encoder = fn(self.agents.encoder)
+            self.agents.decoder = fn(self.agents.decoder)
             self.pol_dev = device
         if not self.critic_dev == device:
-            for a in self.agents:
-                a.critic = fn(a.critic)
+            self.agents.critic = fn(self.agents.critic)
             self.critic_dev = device
-        if not self.trgt_pol_dev == device:
-            for a in self.agents:
-                a.target_policy = fn(a.target_policy)
-            self.trgt_pol_dev = device
         if not self.trgt_critic_dev == device:
-            for a in self.agents:
-                a.target_critic = fn(a.target_critic)
+            self.agents.target_critic = fn(self.agents.target_critic)
             self.trgt_critic_dev = device
 
     def prep_rollouts(self, device='cpu'):
-        for a in self.agents:
-            a.policy.eval()
+        self.agents.encoder.eval()
+        self.agents.decoder.eval()
         if device == 'gpu':
             fn = lambda x: x.cuda()
         else:
             fn = lambda x: x.cpu()
         # only need main policy for rollouts
         if not self.pol_dev == device:
-            for a in self.agents:
-                a.policy = fn(a.policy)
+            self.agents.encoder = fn(self.agents.encoder)
+            self.agents.decoder = fn(self.agents.decoder)
             self.pol_dev = device
 
     def save(self, filename):
@@ -226,7 +203,7 @@ class MADDPG(object):
         """
         self.prep_training(device='cpu')  # move parameters to CPU before saving
         save_dict = {'init_dict': self.init_dict,
-                     'agent_params': [a.get_params() for a in self.agents]}
+                     'agent_params': self.agents.get_params()}
         torch.save(save_dict, filename)
 
     @classmethod
@@ -258,7 +235,7 @@ class MADDPG(object):
                 num_in_critic = obsp.shape[0] + get_shape(acsp)
             agent_init_params.append({'num_in_pol': num_in_pol,
                                       'num_out_pol': num_out_pol,
-                                      'num_in_critic': num_in_critic})
+                                      'num_vars': len(alg_types)})
         init_dict = {'gamma': gamma, 'tau': tau, 'lr': lr,
                      'hidden_dim': hidden_dim,
                      'alg_types': alg_types,
