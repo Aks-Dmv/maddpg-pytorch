@@ -34,6 +34,9 @@ def run(config):
             frames = []
             frames.append(env.render('rgb_array')[0])
         env.render('human')
+
+        rnn_hidden = ( torch.zeros(1, config.n_rollout_threads * (maddpg.nagents)*(maddpg.nagents - 1), config.hidden_dim), 
+                        torch.zeros(1, config.n_rollout_threads * (maddpg.nagents)*(maddpg.nagents - 1), config.hidden_dim) )
         for t_i in range(config.episode_length):
             calc_start = time.time()
             # rearrange observations to be per agent, and convert to torch Variable
@@ -41,7 +44,7 @@ def run(config):
                                   requires_grad=False)
                          for i in range(maddpg.nagents)]
             # get actions as torch Variables
-            torch_actions = maddpg.step(torch_obs, explore=False)
+            torch_actions, new_rnn_hidden = maddpg.step(torch_obs, rnn_hidden, explore=False)
             # convert actions to numpy arrays
             actions = [ac.data.numpy().flatten() for ac in torch_actions]
             obs, rewards, dones, infos = env.step(actions)
@@ -52,6 +55,7 @@ def run(config):
             if elapsed < ifi:
                 time.sleep(ifi - elapsed)
             env.render('human')
+            rnn_hidden = new_rnn_hidden
         if config.save_gifs:
             gif_num = 0
             while (gif_path / ('%i_%i.gif' % (gif_num, ep_i))).exists():
@@ -76,6 +80,9 @@ if __name__ == '__main__':
     parser.add_argument("--n_episodes", default=10, type=int)
     parser.add_argument("--episode_length", default=25, type=int)
     parser.add_argument("--fps", default=30, type=int)
+
+    parser.add_argument("--n_rollout_threads", default=1, type=int)
+    parser.add_argument("--hidden_dim", default=64, type=int)
 
     config = parser.parse_args()
 

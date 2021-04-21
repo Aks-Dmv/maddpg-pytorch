@@ -253,6 +253,5 @@ class MADDPG(object):
         save_dict = torch.load(filename)
         instance = cls(**save_dict['init_dict'])
         instance.init_dict = save_dict['init_dict']
-        for a, params in zip(instance.agents, save_dict['agent_params']):
-            a.load_params(params)
+        instance.agents.load_params(save_dict['agent_params'])
         return instance
