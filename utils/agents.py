@@ -143,7 +143,7 @@ class RL_DNRIAgent(object):
             action (PyTorch Variable): Actions for this agent
         """
         prior_logits, new_enc_hid = self.encoder(obs, enc_hid)
-        prior_logits = gumbel_softmax(prior_logits, hard=True)
+        prior_logits = gumbel_softmax(prior_logits, hard=False)
         
         pi_action, logp_pi, decoder_hidden_state = self.decoder(obs, prior_logits)
         if explore:
