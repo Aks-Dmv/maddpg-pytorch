@@ -74,7 +74,7 @@ def gumbel_softmax_sample(logits, temperature):
     if logits.is_cuda:
         gumbSamp = gumbSamp.cuda()
     y = logits + gumbSamp
-    return F.softmax(y / temperature, dim=1)
+    return F.softmax(y / temperature, dim=-1)
 
 # modified for PyTorch from https://github.com/ericjang/gumbel-softmax/blob/master/Categorical%20VAE.ipynb
 def gumbel_softmax(logits, temperature=1.0, hard=False):
