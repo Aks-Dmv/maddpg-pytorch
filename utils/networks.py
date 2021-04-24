@@ -359,8 +359,12 @@ class DNRI_Encoder(nn.Module):
         old_shape = x.shape
         x  = x.contiguous().view(-1, 1, old_shape[-1])
         old_prior_shape = prior_state[0].shape
-        prior_state = (prior_state[0].view(1, old_prior_shape[0]*old_prior_shape[1], old_prior_shape[2]),
-                       prior_state[1].view(1, old_prior_shape[0]*old_prior_shape[1], old_prior_shape[2]))
+        if x.is_cuda:
+            prior_state = (prior_state[0].view(1, old_prior_shape[0]*old_prior_shape[1], old_prior_shape[2]).cuda(),
+                            prior_state[1].view(1, old_prior_shape[0]*old_prior_shape[1], old_prior_shape[2]).cuda())
+        else:
+            prior_state = (prior_state[0].view(1, old_prior_shape[0]*old_prior_shape[1], old_prior_shape[2]),
+                            prior_state[1].view(1, old_prior_shape[0]*old_prior_shape[1], old_prior_shape[2]))
 
         x, new_prior_state = self.forward_rnn(x, prior_state)
         prior_result = self.prior_fc_out(x).view(old_shape[0], old_shape[1], self.num_edges)

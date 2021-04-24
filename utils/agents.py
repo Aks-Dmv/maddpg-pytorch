@@ -146,13 +146,6 @@ class RL_DNRIAgent(object):
         prior_logits = gumbel_softmax(prior_logits, hard=False)
         
         pi_action, logp_pi, decoder_hidden_state = self.decoder(obs, prior_logits)
-        if explore:
-            expl_noise = Variable(Tensor(self.exploration.noise()),
-                                   requires_grad=False)
-            if pi_action.is_cuda:
-                expl_noise = expl_noise.cuda()
-            pi_action += expl_noise
-        pi_action = pi_action.clamp(-1, 1)
         return pi_action, logp_pi, new_enc_hid, decoder_hidden_state
 
     def get_params(self):

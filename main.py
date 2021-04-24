@@ -50,11 +50,25 @@ def run(config):
         torch.set_num_threads(config.n_training_threads)
     env = make_parallel_env(config.env_id, config.n_rollout_threads, config.seed,
                             config.discrete_action)
-    maddpg = MADDPG.init_from_env(env, agent_alg=config.agent_alg,
-                                  adversary_alg=config.adversary_alg,
-                                  tau=config.tau,
-                                  lr=config.lr,
-                                  hidden_dim=config.hidden_dim)
+    
+    if isinstance(env.action_space[0], Box):
+        discr_act = False
+        get_shape = lambda x: x.shape[0]
+    else:  # Discrete
+        discr_act = True
+        get_shape = lambda x: x.n
+    num_out_pol = get_shape(env.action_space[0])
+    
+    agent_init_params = {'num_in_pol': env.observation_space[0].shape[0],
+                        'num_out_pol': num_out_pol,
+                        'num_vars': len(env.agent_types)}
+    maddpg = MADDPG(agent_init_params, 
+                    nagents = len(env.agent_types), 
+                    tau=config.tau,
+                    lr=config.lr,
+                    hidden_dim=config.hidden_dim,
+                    discrete_action=discr_act)
+    return 0
     replay_buffer = ReplayBuffer(config.buffer_length, maddpg.nagents,
                                  [obsp.shape[0] for obsp in env.observation_space],
                                  [acsp.shape[0] if isinstance(acsp, Box) else acsp.n
@@ -67,7 +81,6 @@ def run(config):
                                         config.n_episodes))
         obs = env.reset()
         # obs.shape = (n_rollout_threads, nagent)(nobs), nobs differs per agent so not tensor
-        maddpg.prep_rollouts(device='cpu')
 
         explr_pct_remaining = max(0, config.n_exploration_eps - ep_i) / config.n_exploration_eps
         maddpg.scale_noise(config.final_noise_scale + (config.init_noise_scale - config.final_noise_scale) * explr_pct_remaining)
@@ -89,7 +102,7 @@ def run(config):
                        new_rnn_hidden[1].detach().contiguous().view(config.n_rollout_threads, maddpg.nagents, -1))
 
             # convert actions to numpy arrays
-            agent_actions = [ac.data.numpy() for ac in torch_agent_actions]
+            agent_actions = [ac.data.numpy() for ac in torch_agent_actions.cpu()]
             # rearrange actions to be per environment
             actions = [[ac[i] for ac in agent_actions] for i in range(config.n_rollout_threads)]
             next_obs, rewards, dones, infos = env.step(actions)
@@ -98,28 +111,15 @@ def run(config):
             t += config.n_rollout_threads
             if (len(replay_buffer) >= config.batch_size and
                 (t % config.steps_per_update) < config.n_rollout_threads):
-                if USE_CUDA:
-                    maddpg.prep_training(device='gpu')
-                else:
-                    maddpg.prep_training(device='cpu')
-                for u_i in range(config.n_rollout_threads):
-                    for a_i in range(maddpg.nagents):
-                        sample = replay_buffer.sample(config.batch_size,
-                                                      to_gpu=USE_CUDA)
-                        maddpg.update(sample, a_i, logger=logger)
-                    maddpg.update_all_targets()
-                maddpg.prep_rollouts(device='cpu')
+                sample = replay_buffer.sample(config.batch_size, to_gpu=USE_CUDA)
+                maddpg.update(sample)
+                maddpg.update_all_targets()
             rnn_hidden = new_rnn_hidden
         ep_rews = replay_buffer.get_average_rewards(
             config.episode_length * config.n_rollout_threads)
         for a_i, a_ep_rew in enumerate(ep_rews):
             logger.add_scalar('agent%i/mean_episode_rewards' % a_i, a_ep_rew, ep_i)
             print("Episode %i, reward for %i is " % (ep_i + 1, a_i), a_ep_rew)
-
-        if ep_i % config.save_interval < config.n_rollout_threads:
-            os.makedirs(run_dir / 'incremental', exist_ok=True)
-            maddpg.save(run_dir / 'incremental' / ('model_ep%i.pt' % (ep_i + 1)))
-            maddpg.save(run_dir / 'model.pt')
 
     maddpg.save(run_dir / 'model.pt')
     env.close()
