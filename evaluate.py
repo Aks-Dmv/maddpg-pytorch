@@ -7,7 +7,7 @@ from pathlib import Path
 from torch.autograd import Variable
 from utils.make_env import make_env
 from algorithms.maddpg import MADDPG
-
+from gym.spaces import Box, Discrete
 
 def run(config):
     model_path = (Path('./models') / config.env_id / config.model_name /
@@ -22,9 +22,24 @@ def run(config):
         gif_path = model_path.parent / 'gifs'
         gif_path.mkdir(exist_ok=True)
 
-    maddpg = MADDPG.init_from_save(model_path)
-    env = make_env(config.env_id, discrete_action=maddpg.discrete_action)
-    maddpg.prep_rollouts(device='cpu')
+    env = make_env(config.env_id, discrete_action=False)
+    if isinstance(env.action_space[0], Box):
+        discr_act = False
+        get_shape = lambda x: x.shape[0]
+    else:  # Discrete
+        discr_act = True
+        get_shape = lambda x: x.n
+    num_out_pol = get_shape(env.action_space[0])
+    
+    agent_init_params = {'num_in_pol': env.observation_space[0].shape[0],
+                        'num_out_pol': num_out_pol,
+                        'num_vars': 3}
+    maddpg = MADDPG(agent_init_params, 
+                    nagents = 3,
+                    hidden_dim=config.hidden_dim,
+                    discrete_action=discr_act)
+    save_dict = torch.load(model_path)
+    maddpg.agents.load_params(save_dict['agent_params'])
     ifi = 1 / config.fps  # inter-frame interval
 
     for ep_i in range(config.n_episodes):
@@ -46,7 +61,7 @@ def run(config):
             # get actions as torch Variables
             torch_actions, new_rnn_hidden = maddpg.step(torch_obs, rnn_hidden, explore=False)
             # convert actions to numpy arrays
-            actions = [ac.data.numpy().flatten() for ac in torch_actions]
+            actions = [ac.data.numpy().flatten() for ac in torch_actions.cpu()]
             obs, rewards, dones, infos = env.step(actions)
             if config.save_gifs:
                 frames.append(env.render('rgb_array')[0])
@@ -82,7 +97,7 @@ if __name__ == '__main__':
     parser.add_argument("--fps", default=30, type=int)
 
     parser.add_argument("--n_rollout_threads", default=1, type=int)
-    parser.add_argument("--hidden_dim", default=64, type=int)
+    parser.add_argument("--hidden_dim", default=128, type=int)
 
     config = parser.parse_args()
 

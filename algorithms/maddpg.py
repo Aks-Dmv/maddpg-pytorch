@@ -115,7 +115,9 @@ class MADDPG(object):
             rews = rews.cuda()
             next_obs = next_obs.cuda()
             dones = dones.cuda()
-
+        curr_agent.encoder.train()
+        curr_agent.decoder.train()
+        curr_agent.critic.train()
         curr_agent.policy_optimizer.zero_grad()
         curr_agent.critic_optimizer.zero_grad()
         pi_action2, logp_pi, _, trgt_vf_in = curr_agent.step(next_obs, next_hid_enc)
@@ -158,10 +160,10 @@ class MADDPG(object):
 
     def prep_training(self, device='gpu'):
         if device == 'gpu':
-            self.agents.encoder = self.agents.encoder.cuda()
-            self.agents.decoder = self.agents.decoder.cuda()
-            self.agents.critic = self.agents.critic.cuda()
-            self.agents.target_critic = self.agents.target_critic.cuda()
+            self.agents.encoder.cuda()
+            self.agents.decoder.cuda()
+            self.agents.critic.cuda()
+            self.agents.target_critic.cuda()
             self.pol_dev = device
         self.agents.encoder.train()
         self.agents.decoder.train()
@@ -172,6 +174,5 @@ class MADDPG(object):
         """
         Save trained parameters of all agents into one file
         """
-        save_dict = {'init_dict': self.init_dict,
-                     'agent_params': self.agents.get_params()}
+        save_dict = {'agent_params': self.agents.get_params()}
         torch.save(save_dict, filename)
