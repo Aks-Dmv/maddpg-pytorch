@@ -112,7 +112,7 @@ def run(config):
             if (len(replay_buffer) >= config.batch_size and
                 (t % config.steps_per_update) < config.n_rollout_threads):
                 sample = replay_buffer.sample(config.batch_size, to_gpu=USE_CUDA)
-                maddpg.update(sample)
+                maddpg.update(sample, ep_i)
                 maddpg.update_all_targets()
             rnn_hidden = new_rnn_hidden
         ep_rews = replay_buffer.get_average_rewards(

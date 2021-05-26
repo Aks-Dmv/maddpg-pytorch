@@ -86,7 +86,7 @@ class MADDPG(object):
         pi_action = pi_action.transpose(0, 1).contiguous() # back to [agent, batch, hidden]
         return pi_action, new_enc_hid
 
-    def update(self, sample):
+    def update(self, sample, epoch):
         """
         Update parameters of agent model based on sample from replay buffer
         Inputs:
@@ -140,15 +140,16 @@ class MADDPG(object):
         curr_agent.policy_optimizer.zero_grad()
         curr_agent.critic_optimizer.zero_grad()
 
-        pi_action, logp_pi, _, dec_hidden = curr_agent.step(obs, hid_enc)
-        
-        q1_pi, q2_pi = curr_agent.critic(dec_hidden.detach(), pi_action)
-        q_pi = torch.min(q1_pi, q2_pi).sum(dim=-1)
+        if epoch > 100 and epoch % 3 == 0:
+            pi_action, logp_pi, _, dec_hidden = curr_agent.step(obs, hid_enc)
+            
+            q1_pi, q2_pi = curr_agent.critic(dec_hidden.detach(), pi_action)
+            q_pi = torch.min(q1_pi, q2_pi).sum(dim=-1)
 
-        pol_loss = (self.alpha * logp_pi - q_pi ).mean()
-        pol_loss.backward()
-        print(pol_loss,"pol")
-        curr_agent.policy_optimizer.step()
+            pol_loss = (self.alpha * logp_pi - q_pi ).mean()
+            pol_loss.backward()
+            print(pol_loss,"pol")
+            curr_agent.policy_optimizer.step()
 
     def update_all_targets(self):
         """
